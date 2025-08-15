@@ -14,6 +14,7 @@ import PIL.Image
 import torch
 from matplotlib import pyplot as plt
 from tqdm import tqdm
+import open3d as o3d
 
 from depth_pro import create_model_and_transforms, load_rgb
 
@@ -28,6 +29,35 @@ def get_torch_device() -> torch.device:
     elif torch.backends.mps.is_available():
         device = torch.device("mps")
     return device
+
+
+def save_colored_point_cloud(ply_file, image, depth, K_mat):
+   #LOGGER.info(f"Colored point cloud saved to: {ply_file}")
+    """Save a colored point cloud to a PLY file."""
+    h, w = depth.shape
+    fx, fy = K_mat[0, 0], K_mat[1, 1]
+    cx, cy = K_mat[0, 2], K_mat[1, 2]
+
+    # Create a point cloud.
+    points = []
+    colors = []
+    for v in range(h):
+        for u in range(w):
+            z = depth[v, u]
+            if z <= 0 or z > 15:
+                continue
+            x = (u - cx) * z / fx
+            y = (v - cy) * z / fy
+            points.append([x, y, z])
+            colors.append(image[v, u] / 255.0)
+
+    # Create Open3D point cloud.
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(points)
+    pcd.colors = o3d.utility.Vector3dVector(colors)
+
+    # Save to PLY file.
+    o3d.io.write_point_cloud(ply_file, pcd)
 
 
 def run(args):
@@ -55,11 +85,17 @@ def run(args):
         ax_rgb = fig.add_subplot(121)
         ax_disp = fig.add_subplot(122)
 
+
     for image_path in tqdm(image_paths):
         # Load image and focal length from exif info (if found.).
+        cx = None
+        cy = None
         try:
             LOGGER.info(f"Loading image {image_path} ...")
             image, _, f_px = load_rgb(image_path)
+#            f_px = np.float32(1490.6609)
+#            cx = 1441.2617
+#            cy = 948.5068
         except Exception as e:
             LOGGER.error(str(e))
             continue
@@ -73,6 +109,7 @@ def run(args):
             LOGGER.debug(f"Focal length (from exif): {f_px:0.2f}")
         elif prediction["focallength_px"] is not None:
             focallength_px = prediction["focallength_px"].detach().cpu().item()
+            f_px = focallength_px
             LOGGER.info(f"Estimated focal length: {focallength_px}")
 
         inverse_depth = 1 / depth
@@ -104,6 +141,30 @@ def run(args):
             PIL.Image.fromarray(color_depth).save(
                 color_map_output_file, format="JPEG", quality=90
             )
+
+            # save to colored point cloud in ply format.
+            # fx_kitti = 7.188560000000e+02;
+            # fy_kitti = 7.188560000000e+02;
+            # cx_kitti = 6.071928000000e+02;
+            # cy_kitti = 1.852157000000e+02;
+            fx_kitti = f_px
+            fy_kitti = f_px
+            cx_kitti = cx if cx is not None else image.shape[1] / 2
+            cy_kitti = cy if cy is not None else image.shape[0] / 2
+
+            K_mat = np.array(
+                [
+                    [fx_kitti, 0, cx_kitti],
+                    [0, fy_kitti, cy_kitti],
+                    [0, 0, 1],
+                ]
+            )
+            ply_output_file = str(output_file) + ".ply"
+            LOGGER.info(f"Saving colored point cloud to: {ply_output_file}")
+            print(f"Image shape: {image.shape}")
+            print(f"Depth shape: {depth.shape}")
+            print(f"K matrix: {K_mat}")
+            save_colored_point_cloud(ply_output_file, image, depth, K_mat)
 
         # Display the image and estimated depth map.
         if not args.skip_display:

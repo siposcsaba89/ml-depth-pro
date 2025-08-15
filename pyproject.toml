@@ -10,6 +10,7 @@ dependencies = [
     "numpy<2",
     "pillow_heif",
     "matplotlib",
+    "open3d"
 ]
 
 [project.scripts]
