@@ -14,7 +14,7 @@ import PIL.Image
 import torch
 from matplotlib import pyplot as plt
 from tqdm import tqdm
-import open3d as o3d
+from plyfile import PlyData, PlyElement
 
 from depth_pro import create_model_and_transforms, load_rgb
 
@@ -38,26 +38,52 @@ def save_colored_point_cloud(ply_file, image, depth, K_mat):
     fx, fy = K_mat[0, 0], K_mat[1, 1]
     cx, cy = K_mat[0, 2], K_mat[1, 2]
 
-    # Create a point cloud.
-    points = []
-    colors = []
-    for v in range(h):
-        for u in range(w):
-            z = depth[v, u]
-            if z <= 0 or z > 15:
-                continue
-            x = (u - cx) * z / fx
-            y = (v - cy) * z / fy
-            points.append([x, y, z])
-            colors.append(image[v, u] / 255.0)
+    # Vectorized point cloud creation (avoid Python loops + list * 255 repetition).
+    # Valid depth mask (limit max range for point cloud density control).
+    mask = (depth > 0) & (depth <= 15)
+    if not np.any(mask):
+        LOGGER.warning("No valid depth points found within range; skipping point cloud save.")
+        return
 
-    # Create Open3D point cloud.
-    pcd = o3d.geometry.PointCloud()
-    pcd.points = o3d.utility.Vector3dVector(points)
-    pcd.colors = o3d.utility.Vector3dVector(colors)
+    v_idx, u_idx = np.nonzero(mask)
+    z = depth[mask]
+    x = (u_idx - cx) * z / fx
+    y = (v_idx - cy) * z / fy
+    points = np.column_stack((x, y, z)).astype(np.float32)
 
-    # Save to PLY file.
-    o3d.io.write_point_cloud(ply_file, pcd)
+    # Ensure image is uint8; if float (0..1 or 0..255) convert safely.
+    if image.dtype != np.uint8:
+        # If values are in 0..1 scale, scale up; heuristic based on max.
+        img_max = image.max() if image.size else 1.0
+        if img_max <= 1.0:
+            img_uint8 = (np.clip(image, 0, 1) * 255).astype(np.uint8)
+        else:
+            img_uint8 = np.clip(image, 0, 255).astype(np.uint8)
+    else:
+        img_uint8 = image
+    colors = img_uint8[v_idx, u_idx]
+
+    # Allocate structured array directly (no per-point Python tuple objects).
+    vertex_dtype = [
+        ('x', 'f4'), ('y', 'f4'), ('z', 'f4'),
+        ('red', 'u1'), ('green', 'u1'), ('blue', 'u1')
+    ]
+    vertex = np.empty(points.shape[0], dtype=vertex_dtype)
+    vertex['x'] = points[:, 0]
+    vertex['y'] = points[:, 1]
+    vertex['z'] = points[:, 2]
+    vertex['red'] = colors[:, 0]
+    vertex['green'] = colors[:, 1]
+    vertex['blue'] = colors[:, 2]
+    ply = PlyData([PlyElement.describe(vertex, 'vertex')], text=False)
+    ply.write(ply_file)
+    LOGGER.info(f"Colored point cloud saved to: {ply_file}")
+
+
+    # save camera matrix
+    cam_file = ply_file.replace('.ply', '_cam.txt')
+    np.savetxt(cam_file, K_mat)
+    LOGGER.info(f"Camera matrix saved to: {cam_file}")
 
 
 def run(args):
